@@ -1,8 +1,12 @@
 #include "vex.h"
 using namespace vex;
+
 competition Competition;
 brain Brain;
 controller Controller1;
+
+// ---------------- PORTS ----------------
+// If you change a port here, change the number in diagRows[] below too.
 motor LeftFront(PORT7, ratio18_1, true);
 motor LeftBack(PORT10, ratio18_1, true);
 motor RightFront(PORT9, ratio18_1, false);
@@ -12,15 +16,134 @@ motor_group RightDrive(RightFront, RightBack);
 motor LeftArm(PORT5, ratio18_1, true);
 motor RightArm(PORT6, ratio18_1, false);
 motor Claw(PORT4, ratio18_1, false);
-motor Toggle(PORT7, ratio18_1, false);
 
-void flip(void) {
+// TODO: PORT3 IS A GUESS. The old code used PORT7, which is LeftFront.
+// Set this to the port that the Toggle motor is connected to.
+motor Toggle(PORT3, ratio18_1, false);
+
+// ---------------- COMMAND TRACKING ----------------
+// These hold the last command sent to each mechanism (percent).
+// The diagnostic screen shows them.
+int cmdLeft = 0;
+int cmdRight = 0;
+int cmdArm = 0;
+int cmdClaw = 0;
+int cmdToggle = 0;
+
+// Send a command to the drive. 0 and 0 stops the drive.
+void driveCmd(int leftPct, int rightPct)
+{
+  cmdLeft = leftPct;
+  cmdRight = rightPct;
+  if (leftPct == 0)
+    LeftDrive.stop(brake);
+  else
+    LeftDrive.spin(forward, leftPct, percent);
+  if (rightPct == 0)
+    RightDrive.stop(brake);
+  else
+    RightDrive.spin(forward, rightPct, percent);
+}
+
+// Send a command to the arm. Positive raises. 0 holds the position.
+void armCmd(int pct)
+{
+  cmdArm = pct;
+  if (pct == 0)
+  {
+    LeftArm.stop(hold);
+    RightArm.stop(hold);
+  }
+  else
+  {
+    LeftArm.spin(forward, pct, percent);
+    RightArm.spin(forward, pct, percent);
+  }
+}
+
+// Send a command to the claw. Positive closes. 0 holds the position.
+void clawCmd(int pct)
+{
+  cmdClaw = pct;
+  if (pct == 0)
+    Claw.stop(hold);
+  else
+    Claw.spin(forward, pct, percent);
+}
+
+void flip(void)
+{
   Toggle.spinFor(forward, 180, degrees, false);
 }
-void pre_auton(void)
+
+// ---------------- DIAGNOSTIC SCREEN ----------------
+// One row for each motor:
+//   name, port, plug status, control, command (c), measured speed (v)
+// "OK" = the Brain sees a motor on that port. "NONE" = no motor found.
+struct DiagRow
+{
+  const char *name;
+  int port;
+  const char *control;
+  motor *m;
+  int *cmd;
+};
+
+DiagRow diagRows[] = {
+    {"LeftFront", 7, "Axis3/1", &LeftFront, &cmdLeft},
+    {"LeftBack", 10, "Axis3/1", &LeftBack, &cmdLeft},
+    {"RightFront", 9, "Axis3/1", &RightFront, &cmdRight},
+    {"RightBack", 8, "Axis3/1", &RightBack, &cmdRight},
+    {"LeftArm", 5, "R1/R2", &LeftArm, &cmdArm},
+    {"RightArm", 6, "R1/R2", &RightArm, &cmdArm},
+    {"Claw", 4, "L1/L2", &Claw, &cmdClaw},
+    {"Toggle", 3, "A", &Toggle, &cmdToggle}, // TODO: match the Toggle port
+};
+const int DIAG_COUNT = sizeof(diagRows) / sizeof(diagRows[0]);
+
+int diagTask()
 {
   Brain.Screen.clearScreen();
-  Brain.Screen.print("Initializing robot...\n");
+  while (true)
+  {
+    // Toggle uses spinFor, so read its state from the motor.
+    cmdToggle = Toggle.isSpinning() ? 100 : 0;
+
+    Brain.Screen.setCursor(1, 1);
+    Brain.Screen.print("MOTOR      PORT PLUG CONTROL   CMD  VEL");
+
+    for (int i = 0; i < DIAG_COUNT; i++)
+    {
+      DiagRow &r = diagRows[i];
+      Brain.Screen.setCursor(i + 2, 1);
+      Brain.Screen.print("%-10s P%-2d  %-4s %-7s c%4d v%4d",
+                         r.name,
+                         r.port,
+                         r.m->installed() ? "OK" : "NONE",
+                         r.control,
+                         *r.cmd,
+                         (int)r.m->velocity(percent));
+    }
+
+    // Raw controller inputs, so you can see that the controller sends data.
+    Brain.Screen.setCursor(DIAG_COUNT + 3, 1);
+    Brain.Screen.print("Ax3%4d Ax1%4d R1%d R2%d L1%d L2%d A%d",
+                       (int)Controller1.Axis3.position(),
+                       (int)Controller1.Axis1.position(),
+                       (int)Controller1.ButtonR1.pressing(),
+                       (int)Controller1.ButtonR2.pressing(),
+                       (int)Controller1.ButtonL1.pressing(),
+                       (int)Controller1.ButtonL2.pressing(),
+                       (int)Controller1.ButtonA.pressing());
+
+    wait(100, msec);
+  }
+  return 0;
+}
+
+// ---------------- COMPETITION ----------------
+void pre_auton(void)
+{
   LeftDrive.setStopping(brake);
   RightDrive.setStopping(brake);
   LeftArm.setStopping(hold);
@@ -34,47 +157,42 @@ void pre_auton(void)
   LeftArm.setMaxTorque(60, percent);
   RightArm.setMaxTorque(60, percent);
   Claw.setMaxTorque(50, percent);
-  Brain.Screen.clearScreen();
-  wait(1, sec);
 }
+
 void autonomous(void)
 {
-  LeftArm.spin(reverse, 40, percent);
-  RightArm.spin(reverse, 40, percent);
+  // NOTE: negative lowers the arm (same direction as R2).
+  // If the arm must go up here, change -40 to 40.
+  armCmd(-40);
   wait(1, sec);
-  LeftArm.stop(hold);
-  RightArm.stop(hold);
-  LeftDrive.spin(forward, 22, percent);
-  RightDrive.spin(forward, 22, percent);
+  armCmd(0);
+
+  // Drive forward
+  driveCmd(22, 22);
   wait(1, sec);
-  LeftDrive.stop(brake);
-  RightDrive.stop(brake);
+  driveCmd(0, 0);
   wait(0.5, sec);
-  LeftDrive.spin(reverse, 11, percent);
-  RightDrive.spin(forward, 11, percent);
+
+  // Turn left
+  driveCmd(-11, 11);
   wait(1.2, sec);
-  LeftDrive.stop(brake);
-  RightDrive.stop(brake);
+  driveCmd(0, 0);
   wait(0.2, sec);
-  LeftDrive.spin(forward, 22, percent);
-  RightDrive.spin(forward, 22, percent);
+
+  // Drive forward
+  driveCmd(22, 22);
   wait(1, sec);
-  LeftDrive.stop(brake);
-  RightDrive.stop(brake);
-  wait(0.2, sec);
-  LeftArm.stop(brake);
-  RightArm.stop(brake);
-  wait(0.1,sec);
-  LeftArm.spin(forward, 10, percent);
-  RightArm.spin(forward, 10, percent);
+  driveCmd(0, 0);
+  wait(0.3, sec);
+
+  // Raise the arm slowly, then hold
+  armCmd(10);
   wait(0.5, sec);
-  LeftArm.stop(brake);
-  RightArm.stop(brake);
+  armCmd(0);
 }
+
 void usercontrol(void)
 {
-  Controller1.ButtonA.pressed(flip); 
-
   while (true)
   {
     float speed = 0.5;
@@ -90,53 +208,46 @@ void usercontrol(void)
     int leftPower = forwardVal + turnVal;
     int rightPower = forwardVal - turnVal;
 
+    // Drift correction when the robot drives straight
     if (turnVal == 0)
     {
       leftPower = (int)(leftPower * 0.85);
     }
 
-    LeftDrive.spin(forward, leftPower, percent);
-    RightDrive.spin(forward, rightPower, percent);
+    driveCmd(leftPower, rightPower);
 
-    // ARM: L1 raises, L2 lowers
+    // ARM: R1 raises, R2 lowers
     if (Controller1.ButtonR1.pressing())
-    {
-      LeftArm.spin(forward, 40, percent);
-      RightArm.spin(forward, 40, percent);
-    }
+      armCmd(40);
     else if (Controller1.ButtonR2.pressing())
-    {
-      LeftArm.spin(reverse, 40, percent);
-      RightArm.spin(reverse, 40, percent);
-    }
+      armCmd(-40);
     else
-    {
-      LeftArm.stop(hold);
-      RightArm.stop(hold);
-    }
+      armCmd(0);
 
     // CLAW: L2 closes, L1 opens
     if (Controller1.ButtonL2.pressing())
-    {
-      Claw.spin(forward, 30, percent);
-    }
+      clawCmd(30);
     else if (Controller1.ButtonL1.pressing())
-    {
-      Claw.spin(reverse, 30, percent);
-    }
+      clawCmd(-30);
     else
-    {
-      Claw.stop(hold);
-    }
+      clawCmd(0);
+
     wait(20, msec);
   }
 }
+
 int main()
 {
+  // Register the button one time only.
+  Controller1.ButtonA.pressed(flip);
+
   Competition.autonomous(autonomous);
   Competition.drivercontrol(usercontrol);
 
   pre_auton();
+
+  // Start the diagnostic screen.
+  task diag(diagTask);
 
   while (true)
   {
